@@ -9,7 +9,7 @@ py-modules = ["models"]
 [project]
 name = "openenv-container-port"
 version = "0.1.0"
-description = "Container yard RL environment - SST x Meta PyTorch OpenEnv Hackathon"
+description = "Container yard RL environment"
 requires-python = ">=3.10"
 dependencies = [
     "openenv-core>=0.2.0",
