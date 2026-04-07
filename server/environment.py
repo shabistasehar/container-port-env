@@ -192,7 +192,7 @@ class ContainerYardEnvironment(Environment):
                     self.rehandle_count += rehandles
                     stack.pop(i)
                     return round(rehandles * 0.4, 4)
-        return 0.0  # container not yet in yard — no penalty
+        return 0.0  # container not yet in yard - no penalty
 
     def _get_upcoming_retrievals(self) -> list[str]:
         start = self.retrieval_pointer
