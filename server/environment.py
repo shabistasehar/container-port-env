@@ -1,11 +1,20 @@
-import random
-from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple
+from __future__ import annotations
 
-@dataclass
+import random
+import uuid
+from dataclasses import dataclass
+from typing import Any
+
+from openenv.core.env_server import Environment, State
+from openenv.core.env_server.types import EnvironmentMetadata
+
+from models import ContainerAction, ContainerObservation
+
+
+@dataclass(slots=True)
 class Container:
     id: str
-    priority: int   # 1=urgent, 2=normal, 3=low
+    priority: int
     weight: float
 
 DIFFICULTY_CONFIG = {
@@ -35,11 +44,18 @@ DIFFICULTY_CONFIG = {
     },
 }
 
-class ContainerYardEnv:
-    def __init__(self, difficulty: str = "medium", seed: Optional[int] = None):
-        assert difficulty in DIFFICULTY_CONFIG, f"difficulty must be one of {list(DIFFICULTY_CONFIG.keys())}"
-        self.difficulty = difficulty
-        self.seed = seed
+class ContainerYardEnvironment(Environment):
+    SUPPORTS_CONCURRENT_SESSIONS = True
+
+    def __init__(self) -> None:
+        self._difficulty = "medium"
+        self._state = State(episode_id=str(uuid.uuid4()), step_count=0)
+        self._init_env("medium", seed=None)
+
+    def _init_env(self, difficulty: str, seed: int | None) -> None:
+        if difficulty not in DIFFICULTY_CONFIG:
+            difficulty = "medium"
+        self._difficulty = difficulty
         cfg = DIFFICULTY_CONFIG[difficulty]
         self.n_stacks = cfg["n_stacks"]
         self.max_height = cfg["max_height"]
@@ -47,23 +63,18 @@ class ContainerYardEnv:
         self.retrieval_interval = cfg["retrieval_interval"]
         self.lookahead = cfg["lookahead"]
         self.priority_weights = cfg["priority_weights"]
-        self.reset()
-
-    def reset(self) -> Dict[str, Any]:
-        if self.seed is not None:
-            random.seed(self.seed)
-        self.stacks: List[List[Container]] = [[] for _ in range(self.n_stacks)]
+        if seed is not None:
+            random.seed(seed)
+        self.stacks: list[list[Container]] = [[] for _ in range(self.n_stacks)]
         self.rehandle_count = 0
-        self.step_count = 0
         self.total_reward = 0.0
         self.done = False
-        self.manifest: List[Container] = self._generate_manifest()
-        self.retrieval_queue: List[str] = self._generate_retrieval_queue()
+        self.manifest: list[Container] = self._generate_manifest()
+        self.retrieval_queue: list[str] = self._generate_retrieval_queue()
         self.retrieval_pointer = 0
         self.current_idx = 0
-        return self._observe(last_reward=0.0)
 
-    def _generate_manifest(self) -> List[Container]:
+    def _generate_manifest(self) -> list[Container]:
         containers = []
         for i in range(self.n_containers):
             priority = random.choices([1, 2, 3], weights=self.priority_weights)[0]
@@ -74,7 +85,7 @@ class ContainerYardEnv:
             ))
         return containers
 
-    def _generate_retrieval_queue(self) -> List[str]:
+    def _generate_retrieval_queue(self) -> list[str]:
         ids_by_priority = {1: [], 2: [], 3: []}
         for c in self.manifest:
             ids_by_priority[c.priority].append(c.id)
@@ -83,45 +94,62 @@ class ContainerYardEnv:
         queue = ids_by_priority[1] + ids_by_priority[2] + ids_by_priority[3]
         return queue
 
-    def step(self, stack_index: int) -> Tuple[Dict[str, Any], float, bool, Dict[str, Any]]:
+    def reset(
+        self,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        **kwargs: Any,
+    ) -> ContainerObservation:
+        difficulty = kwargs.get("difficulty", "medium")
+        self._state = State(
+            episode_id=episode_id or str(uuid.uuid4()),
+            step_count=0,
+        )
+        self._init_env(difficulty, seed)
+        return self._observe(last_reward=0.0)
+
+    def step(
+        self,
+        action: ContainerAction | int,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> ContainerObservation:
         if self.done:
-            return self._observe(0.0), 0.0, True, {"error": "episode already done"}
+            return self._observe(0.0)
+
+        if isinstance(action, int):
+            action = ContainerAction(stack_index=action)
+
+        stack_index = action.stack_index
 
         if stack_index < 0 or stack_index >= self.n_stacks:
             reward = -2.0
             self.total_reward += reward
-            return self._observe(reward), reward, False, {"error": f"invalid stack_index {stack_index}, must be 0-{self.n_stacks-1}"}
+            self._state.step_count += 1
+            return self._observe(reward)
 
         if len(self.stacks[stack_index]) >= self.max_height:
             reward = -2.0
             self.total_reward += reward
-            return self._observe(reward), reward, False, {"error": f"stack {stack_index} is full (height {self.max_height})"}
+            self._state.step_count += 1
+            return self._observe(reward)
 
         current = self.manifest[self.current_idx]
         self.stacks[stack_index].append(current)
         placement_reward = self._placement_reward(stack_index, current)
 
         self.current_idx += 1
-        self.step_count += 1
+        self._state.step_count += 1
 
         retrieval_cost = 0.0
-        retrievals_done = []
-        if self.step_count % self.retrieval_interval == 0:
-            cost, done_ids = self._trigger_retrieval()
+        if self._state.step_count % self.retrieval_interval == 0:
+            cost, _ = self._trigger_retrieval()
             retrieval_cost = cost
-            retrievals_done = done_ids
 
         reward = placement_reward - retrieval_cost
         self.total_reward += reward
         self.done = (self.current_idx >= len(self.manifest))
-
-        return self._observe(reward), reward, self.done, {
-            "rehandles": self.rehandle_count,
-            "step": self.step_count,
-            "placement_reward": round(placement_reward, 4),
-            "retrieval_cost": round(retrieval_cost, 4),
-            "retrievals_done": retrievals_done,
-        }
+        return self._observe(reward)
 
     def _placement_reward(self, stack_index: int, container: Container) -> float:
         # stack_depth = zero-based index of the just-placed container
@@ -143,7 +171,7 @@ class ContainerYardEnv:
 
         return round(base, 4)
 
-    def _trigger_retrieval(self) -> Tuple[float, List[str]]:
+    def _trigger_retrieval(self) -> tuple[float, list[str]]:
         total_cost = 0.0
         done_ids = []
         for _ in range(2):
@@ -166,12 +194,16 @@ class ContainerYardEnv:
                     return round(rehandles * 0.4, 4)
         return 0.0  # container not yet in yard — no penalty
 
-    def _get_upcoming_retrievals(self) -> List[str]:
+    def _get_upcoming_retrievals(self) -> list[str]:
         start = self.retrieval_pointer
         end = min(start + self.lookahead, len(self.retrieval_queue))
         return self.retrieval_queue[start:end]
 
-    def _observe(self, last_reward: float = 0.0) -> Dict[str, Any]:
+    @property
+    def state(self) -> State:
+        return self._state
+
+    def _observe(self, last_reward: float = 0.0) -> ContainerObservation:
         stack_states = []
         for s in self.stacks:
             stack_states.append([{"id": c.id, "priority": c.priority} for c in s])
@@ -181,25 +213,20 @@ class ContainerYardEnv:
             c = self.manifest[self.current_idx]
             current = {"id": c.id, "priority": c.priority, "weight": c.weight}
 
-        return {
-            "stack_states": stack_states,
-            "current_container": current,
-            "upcoming_retrievals": self._get_upcoming_retrievals(),
-            "rehandle_count": self.rehandle_count,
-            "step": self.step_count,
-            "containers_remaining": len(self.manifest) - self.current_idx,
-            "n_stacks": self.n_stacks,
-            "max_height": self.max_height,
-            "difficulty": self.difficulty,
-            "last_reward": last_reward,
-            "done": self.done,
-        }
-
-    def get_state(self) -> Dict[str, Any]:
-        obs = self._observe()
-        obs["score"] = self.score()
-        obs["total_reward"] = round(self.total_reward, 4)
-        return obs
+        return ContainerObservation(
+            stack_states=stack_states,
+            current_container=current,
+            upcoming_retrievals=self._get_upcoming_retrievals(),
+            rehandle_count=self.rehandle_count,
+            step=self._state.step_count,
+            containers_remaining=len(self.manifest) - self.current_idx,
+            n_stacks=self.n_stacks,
+            max_height=self.max_height,
+            difficulty=self._difficulty,
+            last_reward=last_reward,
+            score=self.score(),
+            done=self.done,
+        )
 
     def score(self) -> float:
         """Normalized score in [0.0, 1.0]. Based on actual retrievals attempted."""
@@ -209,3 +236,19 @@ class ContainerYardEnv:
             return 1.0
         score = max(0.0, 1.0 - self.rehandle_count / worst_case)
         return round(min(score, 1.0), 4)
+
+    def get_state(self) -> dict[str, Any]:
+        return self._observe().model_dump()
+
+    def get_metadata(self) -> EnvironmentMetadata:
+        return EnvironmentMetadata(
+            name="container-port-env",
+            description=(
+                "Container terminal yard environment where agents place incoming "
+                "containers into stacks to minimize rehandle cost during retrieval."
+            ),
+            version="0.1.0",
+        )
+
+
+ContainerYardEnv = ContainerYardEnvironment

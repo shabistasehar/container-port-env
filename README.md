@@ -1,71 +1,78 @@
 # Container Port Environment
 
-An OpenEnv-compatible RL environment for container yard management at a shipping terminal.
+An OpenEnv environment for container-yard stack planning at a shipping terminal.
 
 ## Task
 
-A ship arrives with N containers (priority 1=urgent, 2=normal, 3=low). The agent places each into
-stacks. At regular intervals, specific containers are retrieved. If a target is buried under others,
-each container above it is a **rehandle** — expensive in real port operations.
+Incoming containers have priority `1`, `2`, or `3`. The agent places each one into a bounded stack. During retrieval, every container sitting above the target counts as a rehandle and adds cost.
 
-**Goal: minimize total rehandle operations across the episode.**
+Goal: minimize total rehandles across the episode.
 
 ## Difficulty Levels
 
-| Parameter          | Easy     | Medium   | Hard     |
-|--------------------|----------|----------|----------|
-| Stacks             | 6        | 8        | 10       |
-| Max stack height   | 4        | 5        | 6        |
-| Containers         | 20       | 35       | 50       |
-| Retrieval interval | every 5  | every 5  | every 4  |
-| Lookahead shown    | 5        | 3        | 0        |
+| Parameter | Easy | Medium | Hard |
+|---|---|---|---|
+| Stacks | 6 | 8 | 10 |
+| Max height | 4 | 5 | 6 |
+| Containers | 20 | 35 | 50 |
+| Retrieval interval | 5 | 5 | 4 |
+| Lookahead | 5 | 3 | 0 |
 
-## Reward
+## Run Locally
 
-| Event | Reward |
-|---|---|
-| Accessible placement of priority-1 (near top) | up to +0.45 |
-| General placement | +0.03 to +0.30 |
-| Burying high-priority under low-priority | -0.10 to -0.20 |
-| Invalid action (full stack / bad index) | -2.0 |
-| Each rehandle at retrieval time | -0.40 |
-
-## Score
-
-`score = 1.0 - (actual_rehandles / worst_case_rehandles)`, in [0.0, 1.0].
-
-## Setup
 ```bash
-pip install -r requirements.txt
-uvicorn server.server:app --host 0.0.0.0 --port 7860
+pip install -e .
+uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 
-## Run inference
+Web UI: `http://127.0.0.1:7860/web`
+
+For manual stateful checks, use the web endpoints:
+
 ```bash
-# Greedy agent, all difficulties
+curl http://127.0.0.1:7860/health
+curl -X POST http://127.0.0.1:7860/web/reset -H "Content-Type: application/json" -d "{\"difficulty\":\"easy\"}"
+curl -X POST http://127.0.0.1:7860/web/step -H "Content-Type: application/json" -d "{\"action\":{\"stack_index\":0}}"
+```
+
+`/reset` and `/step` are stateless simulation endpoints in `openenv-core 0.2.3`. For browser-style interactive testing, use `/web`, `/web/reset`, `/web/step`, or the WebSocket flow used by `inference.py`.
+
+## Run Inference
+
+```bash
 python inference.py --difficulty all
-
-# LLM agent (requires HF token in env)
-export HF_TOKEN=hf_your_token_here
-python inference.py --use-llm --difficulty all
-
-# Against deployed HF Space
-python inference.py --url https://YOUR_USERNAME-container-port-env.hf.space --difficulty all
+python inference.py --difficulty easy
+python inference.py --url http://127.0.0.1:7860 --difficulty all
 ```
+
+For LLM mode, set `HF_TOKEN` first.
 
 ## Docker
+
 ```bash
 docker build -t container-port-env .
 docker run -p 7860:7860 container-port-env
 ```
 
-## API
+## Tests
 
-- `GET /ping` — health check
-- `GET /health` — server stats
-- `WS /ws` — WebSocket interface
+Run the full test suite:
 
-WebSocket messages:
-- `{"type": "reset", "difficulty": "easy"}` — start episode
-- `{"type": "step", "action": {"stack_index": 2}}` — place container
-- `{"type": "state"}` — get full state with score
+```bash
+pytest tests/test_openenv_env.py -v
+```
+
+| Test | What it covers |
+|---|---|
+| test_reset_returns_valid_obs | Reset returns correct stack count, step=0, no rehandles |
+| test_step_valid_action | Valid placement increments step and fills stack |
+| test_step_invalid_action_penalized | Out-of-range stack index returns -2.0 reward |
+| test_score_in_range | Full episode score stays in [0.0, 1.0] |
+| test_full_episode_completes | All 3 difficulties reach done=True within 500 steps |
+| test_lookahead_visibility | Easy shows more upcoming retrievals than hard (hard=0) |
+| test_reward_is_dense | At least 50% of steps have non-zero reward |
+| test_no_double_retrieval | retrieval_pointer never exceeds queue length |
+| test_health_route | GET /health returns 200 |
+| test_web_ui_route | GET /web returns 200 (Gradio UI) |
+| test_http_reset_returns_observation | POST /reset returns valid easy-mode observation |
+| test_http_reset_then_step_preserves_state | Sequential reset+step operates on same episode |

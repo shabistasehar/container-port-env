@@ -1,30 +1,17 @@
+spec_version: 1
 name: container-port-env
 version: "0.1.0"
+type: standard
+runtime: docker
+app: server.app:app
+port: 7860
 description: >
   Container terminal yard RL environment. An agent places incoming ship
-  containers into stacks of limited height to minimize costly rehandle
-  operations during retrieval. Features 3 difficulty levels (easy/medium/hard)
-  with different stack configurations, retrieval frequencies, and lookahead
-  visibility. Models real port logistics decision-making.
+  containers into stacks to minimize costly rehandle operations during
+  retrieval. Three difficulty levels: easy (6 stacks, lookahead 5),
+  medium (8 stacks, lookahead 3), hard (10 stacks, no lookahead).
 tags:
   - logistics
   - planning
   - real-world
   - combinatorial-optimization
-sdk: docker
-entry_point: server.server:app
-tools:
-  - name: place_container
-    description: >
-      Place the current incoming container into a specified stack index.
-      Priority 1=urgent (retrieved first), 2=normal, 3=low (retrieved last).
-      Burying high-priority under low-priority causes rehandle costs.
-    input_schema:
-      type: object
-      properties:
-        stack_index:
-          type: integer
-          description: "Zero-indexed stack to place the container into"
-          minimum: 0
-      required:
-        - stack_index

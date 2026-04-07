@@ -1,50 +1,90 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Container Port OpenEnv — Baseline Inference Script
-SST x Meta PyTorch OpenEnv Hackathon
+SST x Meta PyTorch OpenEnv Hackathon 2026
 
-Required environment variables (or set below):
-  HF_TOKEN      - Your Hugging Face token
-  API_BASE_URL  - LLM API endpoint (default: https://router.huggingface.co/v1)
-  MODEL_NAME    - Model identifier (default: meta-llama/Llama-3.1-8B-Instruct)
+Stdout format (grader parses these exactly):
+  [START] task=<task> env=container-port-env model=<model>
+  [STEP]  step=<n> action=<stack_idx> reward=<0.00> done=<true|false> error=<msg|null>
+  [END]   success=<true|false> steps=<n> score=<0.000> rewards=<r1,r2,...>
 
 Usage:
   python inference.py
-  python inference.py --url https://YOUR_USERNAME-container-port-env.hf.space --difficulty all
   python inference.py --difficulty easy
+  python inference.py --difficulty all
+  python inference.py --use-llm
+  python inference.py --url https://YOUR_USERNAME-container-port-env.hf.space
 """
 
+import asyncio
 import os
 import sys
 import json
-import asyncio
-import argparse
-import websockets
+from typing import List, Optional
 from openai import OpenAI
 
+# Load .env file if present (before os.getenv calls)
+def _load_dotenv():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
+_load_dotenv()
+
 #  Required configuration variables 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.1-8B-Instruct")
-HF_TOKEN     = os.getenv("HF_TOKEN",     "")   # set your HF token here or via env var
+API_BASE_URL      = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME        = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.1-8B-Instruct")
+HF_TOKEN          = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME  = os.getenv("LOCAL_IMAGE_NAME")
+API_KEY           = HF_TOKEN or os.getenv("API_KEY")
 # 
 
-ENV_URL = os.getenv("ENV_URL", "http://localhost:7860")
+ENV_URL       = os.getenv("ENV_URL", "http://localhost:7860")
+TASK_NAME     = "container-stacking"
+BENCHMARK     = "container-port-env"
+MAX_STEPS     = 200  # hard mode has 50 containers, safety ceiling
+SUCCESS_SCORE_THRESHOLD = 0.5
 
 
-def _llm_client() -> OpenAI:
-    """Return an OpenAI-compatible client pointed at HF Inference Router."""
-    return OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+#  Logging helpers (exact SST format) 
 
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+#  Agents 
 
 def greedy_decide(obs: dict) -> int:
-    """
-    Greedy heuristic agent — no LLM call.
-    Scores each valid stack by accessibility and priority compatibility.
-    """
-    stacks    = obs["stack_states"]
-    current   = obs.get("current_container")
+    stacks     = obs["stack_states"]
+    current    = obs.get("current_container")
     max_height = obs["max_height"]
-    upcoming  = set(obs.get("upcoming_retrievals", []))
+    upcoming   = set(obs.get("upcoming_retrievals", []))
 
     if current is None:
         return 0
@@ -56,16 +96,15 @@ def greedy_decide(obs: dict) -> int:
         depth = len(stack)
         if depth >= max_height:
             continue
-
         score = 0.0
         accessibility = (max_height - depth) / max_height
         score += accessibility * (4 - cur_priority)
 
         if depth > 0:
-            top_priority = stack[-1]["priority"]
-            if cur_priority > top_priority:
-                score -= 10.0 * (cur_priority - top_priority)
-            elif cur_priority < top_priority:
+            top_p = stack[-1]["priority"]
+            if cur_priority > top_p:
+                score -= 10.0 * (cur_priority - top_p)
+            elif cur_priority < top_p:
                 score += 3.0
 
         if current["id"] in upcoming:
@@ -82,53 +121,48 @@ def greedy_decide(obs: dict) -> int:
         for i, stack in enumerate(stacks):
             if len(stack) < max_height:
                 return i
-    return best_stack
+    return max(best_stack, 0)
 
 
-def llm_decide(obs: dict) -> int:
-    """Use HF-hosted LLM via OpenAI-compatible client to choose a stack."""
-    stacks    = obs["stack_states"]
-    current   = obs.get("current_container")
-    n_stacks  = obs["n_stacks"]
+def llm_decide(obs: dict, client: OpenAI) -> int:
+    stacks     = obs["stack_states"]
+    current    = obs.get("current_container")
+    n_stacks   = obs["n_stacks"]
     max_height = obs["max_height"]
-    upcoming  = obs.get("upcoming_retrievals", [])
+    upcoming   = obs.get("upcoming_retrievals", [])
     difficulty = obs.get("difficulty", "medium")
 
-    stack_lines = []
+    lines = []
     for i, stack in enumerate(stacks):
         if not stack:
-            stack_lines.append(f"  Stack {i}: EMPTY (0/{max_height})")
+            lines.append(f"  Stack {i}: EMPTY (0/{max_height})")
         else:
             contents = ", ".join(f"{c['id']}(p{c['priority']})" for c in stack)
-            stack_lines.append(
+            lines.append(
                 f"  Stack {i}: [{contents}] depth={len(stack)}/{max_height},"
                 f" top=priority-{stack[-1]['priority']}"
             )
 
     prompt = (
-        f"You are an expert container yard planner.\n"
-        f"TASK: Place the incoming container into a stack to MINIMIZE future rehandle operations.\n"
-        f"RULE: When a container is retrieved, every container ON TOP of it must be moved (rehandle).\n"
-        f"Priority 1=URGENT (retrieved first), 2=Normal, 3=Low (retrieved last).\n\n"
+        f"You are a container yard planner. Minimize rehandle operations.\n"
+        f"Priority 1=URGENT (retrieved first), 2=Normal, 3=Low.\n"
+        f"RULE: containers above the target at retrieval = rehandles (costly).\n\n"
         f"DIFFICULTY: {difficulty}\n"
-        f"UPCOMING RETRIEVALS (next to be retrieved, in order): "
-        f"{upcoming if upcoming else 'Unknown (hard mode)'}\n\n"
+        f"UPCOMING RETRIEVALS: {upcoming or 'Unknown (hard mode)'}\n\n"
         f"CONTAINER TO PLACE: id={current['id']}, priority={current['priority']}, "
         f"weight={current['weight']}kg\n\n"
-        f"STACK STATES (bottomtop):\n" + "\n".join(stack_lines) + "\n\n"
-        f"Respond with ONLY valid JSON: {{\"stack_index\": <integer 0-{n_stacks-1}>}}"
+        f"STACKS (bottom->top):\n" + "\n".join(lines) + "\n\n"
+        f"Reply ONLY with valid JSON: {{\"stack_index\": <int 0-{n_stacks-1}>}}"
     )
 
     try:
-        client = _llm_client()
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=MODEL_NAME,
             max_tokens=64,
             temperature=0.0,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.choices[0].message.content.strip()
-        # strip markdown fences if model wraps in ```json ... ```
+        text = resp.choices[0].message.content.strip()
         if "```" in text:
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -138,84 +172,100 @@ def llm_decide(obs: dict) -> int:
         if 0 <= idx < n_stacks and len(obs["stack_states"][idx]) < max_height:
             return idx
     except Exception as e:
-        print(f"  [LLM fallback: {e}]", file=sys.stderr)
+        print(f"[DEBUG] LLM fallback: {e}", file=sys.stderr, flush=True)
 
     return greedy_decide(obs)
 
 
-async def run_episode(url: str, difficulty: str = "medium", use_llm: bool = False) -> float:
+#  Episode runner 
+
+async def run_episode(
+    url: str,
+    difficulty: str = "medium",
+    use_llm: bool = False,
+) -> float:
+    import websockets
+
     ws_url = url.replace("http://", "ws://").replace("https://", "wss://")
     if not ws_url.endswith("/ws"):
         ws_url = ws_url.rstrip("/") + "/ws"
 
-    #  [START] log 
-    print(json.dumps({"type": "[START]", "task": difficulty, "difficulty": difficulty,
-                      "env_url": url, "model": MODEL_NAME if use_llm else "greedy"}))
-    sys.stdout.flush()
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if use_llm else None
+    model_label = MODEL_NAME if use_llm else "greedy"
 
-    total_reward = 0.0
-    step = 0
+    log_start(task=f"{TASK_NAME}-{difficulty}", env=BENCHMARK, model=model_label)
 
-    async with websockets.connect(ws_url) as ws:
-        await ws.send(json.dumps({"type": "reset", "difficulty": difficulty}))
-        resp = json.loads(await ws.recv())
-        obs  = resp["observation"]
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
 
-        while not obs.get("done", False):
-            action_idx = llm_decide(obs) if use_llm else greedy_decide(obs)
+    try:
+        async with websockets.connect(ws_url) as ws:
+            await ws.send(json.dumps({"type": "reset", "data": {"difficulty": difficulty}}))
+            resp = json.loads(await ws.recv())
+            payload = resp.get("data", {})
+            obs = payload.get("observation", payload)
 
-            await ws.send(json.dumps({"type": "step", "action": {"stack_index": action_idx}}))
-            resp  = json.loads(await ws.recv())
-            obs   = resp["observation"]
-            reward = resp["reward"]
-            done  = resp["done"]
-            total_reward += reward
-            step += 1
+            for step in range(1, MAX_STEPS + 1):
+                if obs.get("done", False):
+                    break
 
-            #  [STEP] log 
-            print(json.dumps({
-                "type": "[STEP]",
-                "step": step,
-                "action": action_idx,
-                "reward": round(reward, 4),
-                "total_reward": round(total_reward, 4),
-                "done": done,
-                "rehandle_count": obs["rehandle_count"],
-            }))
-            sys.stdout.flush()
+                action_idx = llm_decide(obs, client) if use_llm else greedy_decide(obs)
 
-        # fetch final state for score
-        await ws.send(json.dumps({"type": "state"}))
-        state_resp = json.loads(await ws.recv())
-        state = state_resp["state"]
+                await ws.send(json.dumps({
+                    "type": "step",
+                    "data": {"stack_index": action_idx},
+                }))
+                resp = json.loads(await ws.recv())
+                payload = resp.get("data", {})
+                obs    = payload.get("observation", payload)
+                reward = float(payload.get("reward", obs.get("last_reward", 0.0)) or obs.get("last_reward", 0.0))
+                done   = payload.get("done", obs.get("done", False))
+                error  = payload.get("error", None)
 
-    final_score = state.get("score", 0.0)
+                rewards.append(reward)
+                steps_taken = step
 
-    #  [END] log 
-    print(json.dumps({
-        "type": "[END]",
-        "task": difficulty,
-        "difficulty": difficulty,
-        "total_reward": round(total_reward, 4),
-        "final_score": final_score,
-        "total_steps": step,
-        "rehandle_count": state.get("rehandle_count", 0),
-    }))
-    sys.stdout.flush()
+                log_step(step=step, action=str(action_idx), reward=reward, done=done, error=error)
 
-    return final_score
+                if done:
+                    break
+
+            # Fetch final score
+            await ws.send(json.dumps({"type": "state"}))
+            state_resp = json.loads(await ws.recv())
+            state = state_resp.get("data", {})
+            score = float(state.get("score", obs.get("score", 0.0)))
+            score = min(max(score, 0.0), 1.0)
+
+        success = score >= SUCCESS_SCORE_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] Episode error: {exc}", file=sys.stderr, flush=True)
+
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
 
 
-async def run_all(url: str, use_llm: bool = False):
+async def run_all(url: str, use_llm: bool = False) -> None:
     for diff in ["easy", "medium", "hard"]:
         await run_episode(url, difficulty=diff, use_llm=use_llm)
 
 
+#  Entry point 
+
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser(description="Container Port Baseline Agent")
     parser.add_argument("--url",        default=ENV_URL)
-    parser.add_argument("--difficulty", default="all", choices=["easy", "medium", "hard", "all"])
-    parser.add_argument("--use-llm",    action="store_true")
+    parser.add_argument("--difficulty", default="all",
+                        choices=["easy", "medium", "hard", "all"])
+    parser.add_argument("--use-llm",    action="store_true",
+                        help="Use LLM agent via HF router (requires HF_TOKEN)")
     args = parser.parse_args()
 
     if args.difficulty == "all":
