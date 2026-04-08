@@ -36,5 +36,5 @@ class ContainerObservation(Observation):
     max_height: int = Field(0)
     difficulty: str = Field("medium")
     last_reward: float = Field(0.0)
-    score: float = Field(0.0, description="Normalized score 0.0-1.0")
+    score: float = Field(0.5, description="Normalized score (0.0, 1.0)")
     done: bool = Field(False)

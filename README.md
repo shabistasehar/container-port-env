@@ -37,6 +37,8 @@ uvicorn server.app:app --host 0.0.0.0 --port 7860
 
 Web UI: `http://127.0.0.1:7860/web`
 
+Interactive dashboard with difficulty dropdown: `http://127.0.0.1:7860/dashboard`
+
 For manual stateful checks, use the web endpoints:
 
 ```bash

@@ -43,16 +43,16 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+# Required environment variables
 HF_TOKEN = os.getenv('HF_TOKEN')
 API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.openai.com/v1')
 MODEL_NAME = os.getenv('MODEL_NAME', 'meta-llama/Llama-3.1-8B-Instruct')
-LOCAL_IMAGE_NAME = os.getenv('LOCAL_IMAGE_NAME')
-OPENAI_API_KEY = HF_TOKENAPI_KEY = os.getenv('API_KEY')
-API_KEY = HF_TOKEN
-AUTH_TOKEN =  HF_TOKEN or API_KEY or OPENAI_API_KEY 
 
-if AUTH_TOKEN is None:
-    raise ValueError('OPENAI_API_KEY (or API_KEY/HF_TOKEN) environment variable is required')
+if HF_TOKEN is None:
+    raise ValueError('HF_TOKEN environment variable is required')
+
+# Initialize OpenAI client
+client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
 
 ENV_URL = os.getenv('ENV_URL', 'http://localhost:7860')
 TASK_NAME = 'container-stacking'
@@ -188,7 +188,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
     if not ws_url.endswith('/ws'):
         ws_url = ws_url.rstrip('/') + '/ws'
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=AUTH_TOKEN) if use_llm else None
+    llm_client = client if use_llm else None
     model_label = MODEL_NAME if use_llm else 'greedy'
 
     log_start(task=f'{TASK_NAME}-{difficulty}', env=BENCHMARK, model=model_label)
@@ -209,7 +209,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
                 if obs.get('done', False):
                     break
 
-                action_idx = llm_decide(obs, client) if use_llm else greedy_decide(obs)
+                action_idx = llm_decide(obs, llm_client) if use_llm else greedy_decide(obs)
 
                 await ws.send(json.dumps({'type': 'step', 'data': {'stack_index': action_idx}}))
                 resp = json.loads(await ws.recv())
@@ -229,8 +229,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
             await ws.send(json.dumps({'type': 'state'}))
             state_resp = json.loads(await ws.recv())
             state = state_resp.get('data', {})
-            score = float(state.get('score', obs.get('score', 0.0)))
-            score = min(max(score, 0.0), 1.0)
+            score = float(state.get('score', obs.get('score', 0.5)))
 
         success = score >= SUCCESS_SCORE_THRESHOLD
 

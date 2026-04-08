@@ -229,13 +229,13 @@ class ContainerYardEnvironment(Environment):
         )
 
     def score(self) -> float:
-        """Normalized score in [0.0, 1.0]. Based on actual retrievals attempted."""
+        """Normalized score in (0.0, 1.0). Based on actual retrievals attempted."""
         n_retrieved = self.retrieval_pointer  # only count retrievals that actually happened
         worst_case = n_retrieved * (self.max_height - 1)
         if worst_case == 0:
-            return 1.0
-        score = max(0.0, 1.0 - self.rehandle_count / worst_case)
-        return round(min(score, 1.0), 4)
+            return 0.99
+        score = max(0.01, min(1.0 - self.rehandle_count / worst_case, 0.99))
+        return round(score, 4)
 
     def get_state(self) -> dict[str, Any]:
         return self._observe().model_dump()
