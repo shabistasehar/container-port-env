@@ -54,7 +54,8 @@ def test_score_in_range():
         )
         obs = as_dict(env.step(ContainerAction(stack_index=chosen)))
         done = obs["done"]
-    assert 0.0 <= env.score() <= 1.0
+    # Score must be strictly between 0 and 1 (grader requirement)
+    assert 0.0 < env.score() < 1.0
 
 
 @pytest.mark.parametrize("difficulty", ["easy", "medium", "hard"])
