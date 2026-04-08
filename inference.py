@@ -42,7 +42,7 @@ def _load_dotenv() -> None:
 
 
 _load_dotenv()
-
+API_KEY = os.getenv('API_KEY')
 # Required environment variables
 HF_TOKEN = os.getenv('HF_TOKEN')
 API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.openai.com/v1')
@@ -230,7 +230,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
             state_resp = json.loads(await ws.recv())
             state = state_resp.get('data', {})
             score = float(state.get('score', obs.get('score', 0.5)))
-            score = min(max(score, 0.01), 0.99)
+            score = min(max(score, 0), 1)
 
         success = score >= SUCCESS_SCORE_THRESHOLD
 
