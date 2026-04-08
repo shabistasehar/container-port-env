@@ -12,7 +12,7 @@ Usage:
   python inference.py
   python inference.py --difficulty easy
   python inference.py --difficulty all
-  python inference.py --use-llm
+    python inference.py --no-llm
   python inference.py --url https://YOUR_USERNAME-container-port-env.hf.space
 """
 
@@ -43,11 +43,16 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-API_BASE_URL = os.getenv('API_BASE_URL', 'https://router.huggingface.co/v1')
-MODEL_NAME = os.getenv('MODEL_NAME', 'meta-llama/Llama-3.1-8B-Instruct')
 HF_TOKEN = os.getenv('HF_TOKEN')
+API_BASE_URL = os.getenv('API_BASE_URL', 'https://api.openai.com/v1')
+MODEL_NAME = os.getenv('MODEL_NAME', 'meta-llama/Llama-3.1-8B-Instruct')
 LOCAL_IMAGE_NAME = os.getenv('LOCAL_IMAGE_NAME')
-API_KEY = HF_TOKEN or os.getenv('API_KEY')
+OPENAI_API_KEY = HF_TOKENAPI_KEY = os.getenv('API_KEY')
+API_KEY = HF_TOKEN
+AUTH_TOKEN =  HF_TOKEN or API_KEY or OPENAI_API_KEY 
+
+if AUTH_TOKEN is None:
+    raise ValueError('OPENAI_API_KEY (or API_KEY/HF_TOKEN) environment variable is required')
 
 ENV_URL = os.getenv('ENV_URL', 'http://localhost:7860')
 TASK_NAME = 'container-stacking'
@@ -64,15 +69,15 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
     error_val = error if error else 'null'
     done_val = str(done).lower()
     print(
-        f'[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}',
+        f'[STEP]  step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}',
         flush=True,
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+def log_end(success: bool, steps: int, rewards: List[float]) -> None:
     rewards_str = ','.join(f'{r:.2f}' for r in rewards)
     print(
-        f'[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}',
+        f'[END] success={str(success).lower()} steps={steps} rewards={rewards_str}',
         flush=True,
     )
 
@@ -183,7 +188,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
     if not ws_url.endswith('/ws'):
         ws_url = ws_url.rstrip('/') + '/ws'
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY) if use_llm else None
+    client = OpenAI(base_url=API_BASE_URL, api_key=AUTH_TOKEN) if use_llm else None
     model_label = MODEL_NAME if use_llm else 'greedy'
 
     log_start(task=f'{TASK_NAME}-{difficulty}', env=BENCHMARK, model=model_label)
@@ -233,7 +238,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
         print(f'[DEBUG] Episode error: {exc}', file=sys.stderr, flush=True)
 
     finally:
-        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+        log_end(success=success, steps=steps_taken, rewards=rewards)
 
     return score
 
@@ -247,10 +252,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Container Port Baseline Agent')
     parser.add_argument('--url', default=ENV_URL)
     parser.add_argument('--difficulty', default='all', choices=['easy', 'medium', 'hard', 'all'])
-    parser.add_argument('--use-llm', action='store_true', help='Use LLM agent via HF router (requires HF_TOKEN)')
+    parser.add_argument('--no-llm', action='store_true', help='Disable LLM agent and use greedy policy')
     args = parser.parse_args()
+    use_llm = not args.no_llm
 
     if args.difficulty == 'all':
-        asyncio.run(run_all(args.url, use_llm=args.use_llm))
+        asyncio.run(run_all(args.url, use_llm=use_llm))
     else:
-        asyncio.run(run_episode(args.url, difficulty=args.difficulty, use_llm=args.use_llm))
+        asyncio.run(run_episode(args.url, difficulty=args.difficulty, use_llm=use_llm))

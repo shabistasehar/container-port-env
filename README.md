@@ -55,7 +55,21 @@ python inference.py --difficulty easy
 python inference.py --url http://127.0.0.1:7860 --difficulty all
 ```
 
-For LLM mode, set `HF_TOKEN` first.
+LLM mode is enabled by default in `inference.py` and requires:
+
+```bash
+export API_BASE_URL="https://api.openai.com/v1"  # or validator-provided proxy URL
+export OPENAI_API_KEY="your-validator-provided-token"
+```
+
+`MODEL_NAME` is optional and defaults to `meta-llama/Llama-3.1-8B-Instruct`.
+For compatibility with different validator versions, `API_KEY` and `HF_TOKEN` are also accepted.
+
+To run greedy mode locally without LLM calls:
+
+```bash
+python inference.py --no-llm
+```
 
 ## Docker
 
