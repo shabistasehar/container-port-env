@@ -195,7 +195,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
 
     rewards: List[float] = []
     steps_taken = 0
-    score = 0.0
+    score = 0.5
     success = False
 
     try:
@@ -230,6 +230,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
             state_resp = json.loads(await ws.recv())
             state = state_resp.get('data', {})
             score = float(state.get('score', obs.get('score', 0.5)))
+            score = min(max(score, 0.01), 0.99)
 
         success = score >= SUCCESS_SCORE_THRESHOLD
 
