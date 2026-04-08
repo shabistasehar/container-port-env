@@ -61,11 +61,11 @@ LLM mode is enabled by default in `inference.py` and requires:
 
 ```bash
 export API_BASE_URL="https://api.openai.com/v1"  # or validator-provided proxy URL
-export OPENAI_API_KEY="your-validator-provided-token"
+export HF_TOKEN="your-validator-provided-token"
 ```
 
 `MODEL_NAME` is optional and defaults to `meta-llama/Llama-3.1-8B-Instruct`.
-For compatibility with different validator versions, `API_KEY` and `HF_TOKEN` are also accepted.
+`HF_TOKEN` is required by this script.
 
 To run greedy mode locally without LLM calls:
 

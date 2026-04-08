@@ -58,6 +58,25 @@ def test_score_in_range():
     assert 0.0 < env.score() < 1.0
 
 
+def test_score_varies_across_seeds():
+    scores = []
+    for seed in [1, 7, 13, 21, 42]:
+        env = ContainerYardEnvironment()
+        env.reset(difficulty="medium", seed=seed)
+        done = False
+        while not done:
+            stacks = as_dict(env._observe())["stack_states"]
+            chosen = next(
+                (i for i, stack in enumerate(stacks) if len(stack) < env.max_height), 0
+            )
+            obs = as_dict(env.step(ContainerAction(stack_index=chosen)))
+            done = obs["done"]
+        scores.append(env.score())
+
+    # Avoid disqualification: grader must not return a constant score.
+    assert len(set(scores)) > 1, f"Scores are constant across seeds: {scores}"
+
+
 @pytest.mark.parametrize("difficulty", ["easy", "medium", "hard"])
 def test_full_episode_completes(difficulty):
     env = ContainerYardEnvironment()
