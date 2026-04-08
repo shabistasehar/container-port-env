@@ -19,6 +19,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import math
 import os
 import sys
 from typing import List, Optional
@@ -58,6 +59,17 @@ TASK_NAME = 'container-stacking'
 BENCHMARK = 'container-port-env'
 MAX_STEPS = 200
 SUCCESS_SCORE_THRESHOLD = 0.5
+
+
+def _strict_unit_interval(value: object, fallback: float = 0.5) -> float:
+    """Clamp to a strict (0, 1) range and guard non-finite values."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = fallback
+    if not math.isfinite(v):
+        v = fallback
+    return min(max(v, 0.01), 0.99)
 
 
 def log_start(task: str, env: str, model: str) -> None:
@@ -214,9 +226,9 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
                 resp = json.loads(await ws.recv())
                 payload = resp.get('data', {})
                 obs = payload.get('observation', payload)
-                raw_reward = float(payload.get('reward', obs.get('last_reward', 0.0)) or obs.get('last_reward', 0.0))
-                # Normalize step reward to strictly (0, 1) as required by the grader
-                reward = min(max(raw_reward, 0.01), 0.99)
+                raw_reward = payload.get('reward', obs.get('last_reward', 0.0))
+                # Normalize step reward to strictly (0, 1) as required by the grader.
+                reward = _strict_unit_interval(raw_reward, fallback=0.5)
                 done = payload.get('done', obs.get('done', False))
                 error = payload.get('error', None)
 
@@ -230,8 +242,7 @@ async def run_episode(url: str, difficulty: str = 'medium', use_llm: bool = Fals
             await ws.send(json.dumps({'type': 'state'}))
             state_resp = json.loads(await ws.recv())
             state = state_resp.get('data', {})
-            score = float(state.get('score', obs.get('score', 0.5)))
-            score = min(max(score, 0.01), 0.99)
+            score = _strict_unit_interval(state.get('score', obs.get('score', 0.5)), fallback=0.5)
 
         success = score >= SUCCESS_SCORE_THRESHOLD
 
